@@ -15,6 +15,20 @@ from .openformats2json.to_openFormats.gta_iv_mesh import gta_iv_dict_to_mesh
 # ? https://stackoverflow.com/a/79043194
 
 
+def _read_color_layer_flat(color_layer, count):
+    """Read all RGBA values from a color attribute data block into a flat list.
+    Uses foreach_get which works on all Blender 4.x attribute subtypes."""
+    buf = [0.0] * (count * 4)
+    color_layer.foreach_get("color", buf)
+    return buf
+
+
+def _get_color_at(color_layer_flat, index):
+    """Return [R,G,B,A] as 0-255 ints from the pre-fetched flat buffer."""
+    base = index * 4
+    return [int(color_layer_flat[base + i] * 255) for i in range(4)]
+
+
 def get_bone_by_name(bone_name, armature):
     for bone in armature.data.bones:
         if bone.name == bone_name:
@@ -90,6 +104,13 @@ def export_mesh(self, mesh_obj, is_skinned: bool, num_uvs: int = 6, num_uvs_skin
     has_vertex_color = mesh.color_attributes.active_color is not None
     color_layer_type = mesh.color_attributes.active_color.domain if has_vertex_color else None
     color_layer = mesh.color_attributes.active_color.data if has_vertex_color else None
+    # Pre-fetch all color data into a flat buffer to avoid per-element .color
+    # access which breaks on FloatVectorAttributeValue in Blender 4.x.
+    if has_vertex_color and color_layer is not None:
+        _color_count = len(color_layer)
+        _color_buf = _read_color_layer_flat(color_layer, _color_count)
+    else:
+        _color_buf = None
 
     uv_layers = mesh.uv_layers[:num_uvs_required]
     _tmp = [(0.0, 0.0) for _ in range(vertex_count)]
@@ -109,7 +130,7 @@ def export_mesh(self, mesh_obj, is_skinned: bool, num_uvs: int = 6, num_uvs_skin
             triangle_indices.append(vert_index)
             vertex_normals[vert_index] = mesh.loops[loop_index].normal.to_tuple(7)
             if color_layer_type == "CORNER":
-                color = [int(x * 255) for x in color_layer[loop_index].color] if color_layer else [255, 255, 255, 255]
+                color = _get_color_at(_color_buf, loop_index) if _color_buf else [255, 255, 255, 255]
                 vertex_colors.append(color)
 
             # Store UVs (only first occurrence per vertex per layer)
@@ -134,7 +155,7 @@ def export_mesh(self, mesh_obj, is_skinned: bool, num_uvs: int = 6, num_uvs_skin
         vertices.append(vertex.co.to_tuple(7))
         # vertex_normals.append(vertex.normal.to_tuple())
         if color_layer_type == "POINT":
-            color = [int(x * 255) for x in color_layer[vertex.index].color] if color_layer else [255, 255, 255, 255]
+            color = _get_color_at(_color_buf, vertex.index) if _color_buf else [255, 255, 255, 255]
             vertex_colors.append(color)
 
         # Ensure UV layers align with vertex indices

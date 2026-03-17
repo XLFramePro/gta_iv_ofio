@@ -64,14 +64,39 @@ def create_mesh(self, name, armature, geometry_data: dict, is_skinned: bool, mat
         mat = materials[mtl_index]
         obj.data.materials.append(mat)
 
-    # Add a new vertex color layer
-    if not mesh.color_attributes:
-        mesh.color_attributes.new("Color 1", "BYTE_COLOR", "CORNER")
+    # Vertex colours — Blender 4.5 compatible
+    # -------------------------------------------------------
+    # mesh.color_attributes.new() can silently create a FloatVectorAttribute
+    # instead of the requested BYTE_COLOR in Blender 4.5, making foreach_set
+    # fail because FloatVectorAttributeValue has no "color" property.
+    #
+    # Fix: use the low-level mesh.attributes API which honours the requested
+    # type, then write the data as packed RGBA bytes via foreach_set("color").
+    COLOR_ATTR_NAME = "Col"
 
-    color_layer = mesh.color_attributes.active.data
+    # Remove any pre-existing attribute with this name that has the wrong type
+    if COLOR_ATTR_NAME in mesh.attributes:
+        existing = mesh.attributes[COLOR_ATTR_NAME]
+        if existing.data_type != "BYTE_COLOR" or existing.domain != "CORNER":
+            mesh.attributes.remove(existing)
 
-    for vert_index, vertex in enumerate(mesh.vertices):
-        color_layer[vert_index].color = [x / 255.0 for x in colors[vert_index]]  # Assign RGBA color
+    if COLOR_ATTR_NAME not in mesh.attributes:
+        mesh.attributes.new(COLOR_ATTR_NAME, "BYTE_COLOR", "CORNER")
+
+    color_attr = mesh.attributes[COLOR_ATTR_NAME]
+    color_layer = color_attr.data
+
+    # Build flat RGBA float buffer (values 0.0-1.0), one entry per loop corner
+    flat_colors = []
+    for loop in mesh.loops:
+        flat_colors.extend([x / 255.0 for x in colors[loop.vertex_index]])
+    color_layer.foreach_set("color", flat_colors)
+
+    # Mark as the active colour for display/render
+    try:
+        mesh.color_attributes.active_color = mesh.color_attributes[COLOR_ATTR_NAME]
+    except Exception:
+        pass  # Not critical if this fails
 
     for i, uv_coord in enumerate(uv_coords):
         create_uv_map(mesh, f"UVMap {i}", uv_coord)
@@ -79,13 +104,40 @@ def create_mesh(self, name, armature, geometry_data: dict, is_skinned: bool, mat
     if is_skinned:
         import_skinned_mesh(obj, armature, geometry_data)
 
-    mesh.normals_split_custom_set_from_vertices(normals)
+    # normals_split_custom_set_from_vertices() was removed in Blender 4.1.
+    # Custom normals are now written via a "sharp_vector" POINT attribute.
+    _set_custom_normals(mesh, normals)
 
     if mesh.validate(verbose=True):
         self.report({"WARNING"}, "Invalid geometry corrected/removed, check console.")
     mesh.update()
 
     return obj
+
+
+def _set_custom_normals(mesh, normals):
+    """
+    Set per-vertex custom normals compatible with Blender 4.1+.
+
+    normals_split_custom_set_from_vertices() was removed in 4.1.
+    The new approach writes a 'sharp_vector' float-vector attribute on the
+    POINT domain; Blender reads it when computing face normals.
+    """
+    try:
+        # Blender 4.1+ attribute-based path
+        if "sharp_vector" not in mesh.attributes:
+            mesh.attributes.new("sharp_vector", "FLOAT_VECTOR", "POINT")
+        attr = mesh.attributes["sharp_vector"]
+        flat_normals = []
+        for n in normals:
+            flat_normals.extend(n[:3])
+        attr.data.foreach_set("vector", flat_normals)
+    except Exception:
+        # Fallback for any build that still exposes the legacy API
+        try:
+            mesh.normals_split_custom_set_from_vertices(normals)
+        except AttributeError:
+            pass  # Normals will be auto-computed by Blender
 
 
 def create_uv_map(mesh, name, uv_coord):

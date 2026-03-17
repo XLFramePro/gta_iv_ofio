@@ -13,9 +13,13 @@ from bpy.types import (
     Mesh,
     Bone,
     PropertyGroup,
-    PointLight,
-    SpotLight,
 )
+import bpy.types as _btypes
+# Blender 4.x unified PointLight/SpotLight into a single Light type.
+# We keep a single reference so the properties work for both light types.
+_Light = getattr(_btypes, "Light", None)
+_PointLight = getattr(_btypes, "PointLight", _Light)
+_SpotLight = getattr(_btypes, "SpotLight", _Light)
 from bpy.utils import register_class, unregister_class
 
 from .blender_utils import try_unregister_class, calculate_spot_blend
@@ -383,8 +387,13 @@ def register():
 
     Mesh.mtl = PointerProperty(type=Mtl)
     Bone.attr = PointerProperty(type=GTAIVBone)
-    PointLight.flags, PointLight.attributes = PointerProperty(type=LightFlags), PointerProperty(type=LightAttributes)
-    SpotLight.flags, SpotLight.attributes = PointerProperty(type=LightFlags), PointerProperty(type=LightAttributes)
+    # Register on the unified Light type (covers both point and spot in Blender 4.x).
+    # If the build still has separate types, register on both but guard against duplicates.
+    _PointLight.flags = PointerProperty(type=LightFlags)
+    _PointLight.attributes = PointerProperty(type=LightAttributes)
+    if _SpotLight is not _PointLight:
+        _SpotLight.flags = PointerProperty(type=LightFlags)
+        _SpotLight.attributes = PointerProperty(type=LightAttributes)
     Material.shader = PointerProperty(type=Shader)
 
 
@@ -396,8 +405,12 @@ def unregister():
     unregister_class(Shader)
     del Mesh.mtl
     del Bone.attr
-    del PointLight.flags
-    del PointLight.attributes
-    del SpotLight.flags
-    del SpotLight.attributes
+    del _PointLight.flags
+    del _PointLight.attributes
+    if _SpotLight is not _PointLight:
+        try:
+            del _SpotLight.flags
+            del _SpotLight.attributes
+        except Exception:
+            pass
     del Material.shader

@@ -54,7 +54,9 @@ def export_menu_draw(self, context):
 def register():
     global file_logger_id
     extension_directory = bpy.utils.extension_path_user(__package__)
-    file_logger_id = logger.add(extension_directory + "\gta4-ofio.log", rotation="1 day", retention="3 days")
+    import os
+    _log_path = os.path.join(extension_directory, "gta4-ofio.log")
+    file_logger_id = logger.add(_log_path, rotation="1 day", retention="3 days")
     logger.info(f"GTA4 Blender Addon log file location: {extension_directory}")
 
     # Properties & Panels

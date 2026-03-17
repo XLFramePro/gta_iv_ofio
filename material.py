@@ -28,10 +28,12 @@ def create_materials(shader_list: list[dict], odr_dir: Path) -> list[bpy.types.M
 
         _setup_shader_nodes(shader_type, shader_data, node_tree, bsdf, odr_dir)
 
-        # Alpha handling
+        # Alpha handling (Blender 4.2+ uses surface_render_method; older used blend_method)
         if _is_alpha_shader(shader_type):
-            mat.blend_method = "BLEND" if hasattr(mat, "blend_method") else None
-            mat.surface_render_method = "BLENDED" if hasattr(mat, "surface_render_method") else None
+            if hasattr(mat, "surface_render_method"):
+                mat.surface_render_method = "BLENDED"
+            elif hasattr(mat, "blend_method"):
+                mat.blend_method = "BLEND"
 
         materials.append(mat)
 
