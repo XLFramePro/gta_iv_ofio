@@ -7,10 +7,12 @@ from .export_light import register as register_export_light, unregister as unreg
 from .export_mesh import register as register_export_mesh, unregister as unregister_export_mesh, EXPORT_OT_IV_Mesh
 from .light import register as register_import_light, unregister as unregister_import_light, ImportGTAIVLight
 from .mesh import register as register_import_mesh, unregister as unregister_import_mesh, ImportGTAIVMesh
-from .odd.import_odd import register as register_import_odd, unregister as unregister_import_odd, ImportGTAIVODD
-from .odr.import_odr import register as register_import_odr, unregister as unregister_import_odr, ImportGTAIVODR
-from .oft.import_oft import register as register_import_oft, unregister as unregister_import_oft, ImportGTAIVOFT
-from .obn.import_obn import register as register_import_obn, unregister as unregister_import_obn, ImportGTAIVOBN
+from .odd.gtaiv_odd import register as register_import_odd, unregister as unregister_import_odd, ImportGTAIVODD
+from .odr.gtaiv_odr import register as register_import_odr, unregister as unregister_import_odr, ImportGTAIVODR
+from .oft.gtaiv_oft import register as register_import_oft, unregister as unregister_import_oft, ImportGTAIVOFT
+from .obn.gtaiv_obn import register as register_import_obn, unregister as unregister_import_obn, ImportGTAIVOBN
+from .odr.mp3_odr import register as register_mp3_odr, unregister as unregister_mp3_odr, ImportMP3ODR
+from .odd.mp3_odd import register as register_mp3_odd, unregister as unregister_mp3_odd, ImportMP3ODD
 from .ofio_ui import register as register_ui, unregister as unregister_ui
 from .panels import register as register_panels, unregister as unregister_panels
 from .properties import register as register_properties, unregister as unregister_properties
@@ -20,7 +22,7 @@ file_logger_id = None
 
 class GTA4_MT_import_menu(Menu):
     bl_idname = "GTA4_MT_Import_Menu"
-    bl_label = "GTA IV openFormats"
+    bl_label = "GTA IV / Max Payne 3 openFormats"
 
     def draw(self, context):
         layout = self.layout
@@ -33,10 +35,16 @@ class GTA4_MT_import_menu(Menu):
 
         layout.operator(ImportGTAIVMesh.bl_idname)
         layout.operator(ImportGTAIVLight.bl_idname)
+
+        layout.separator()
+
+        layout.operator(ImportMP3ODR.bl_idname)
+        layout.operator(ImportMP3ODD.bl_idname)
         
 
 def import_menu_draw(self, context):
     self.layout.menu(GTA4_MT_import_menu.bl_idname)
+
 
 
 class GTA4_MT_Export_Menu(Menu):
@@ -74,6 +82,10 @@ def register():
     register_import_mesh()
     register_import_light()
 
+    # MP3 Import operators
+    register_mp3_odr()
+    register_mp3_odd()
+
     # Import menu
     try_unregister_class(GTA4_MT_import_menu)
     bpy.utils.register_class(GTA4_MT_import_menu)
@@ -96,6 +108,10 @@ def unregister():
     unregister_ui()
     unregister_panels()
     unregister_properties()
+
+    # MP3 Import
+    unregister_mp3_odr()
+    unregister_mp3_odd()
 
     # Import
     unregister_import_odr()

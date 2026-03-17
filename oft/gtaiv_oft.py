@@ -8,6 +8,7 @@ from bpy.types import Operator, PropertyGroup
 from bpy_extras.io_utils import ImportHelper
 from loguru import logger
 
+from ..odr.gtaiv_odr import _detect_version
 from ..blender_utils import try_unregister_class
 from ..blender_utils import (create_empty_obj, parent_objs, find_bone_by_id, apply_copy_transforms)
 from ..light import import_lights
@@ -31,7 +32,14 @@ def import_oft(self, filepath: Path) -> tuple[int, int, int]:
     file_extension = filepath.suffix
 
     if file_extension == ".oft":
-        oft_data = gta_iv_oft_to_dict(filepath.resolve())
+        oft_data =         version = _detect_version(filepath)
+        if version and version != "112 2":
+            raise ValueError(
+                f"Unsupported .oft version: {version}\\n"
+                f"File: {filepath}\\n"
+                f"Expected GTA IV version 112 2."
+            )
+        gta_iv_oft_to_dict(filepath.resolve())
     elif file_extension == ".json":
         with open(filepath, "r") as otf_file:
             oft_data = orjson.loads(otf_file.read())

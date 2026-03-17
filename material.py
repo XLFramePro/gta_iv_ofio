@@ -194,6 +194,8 @@ def _create_texture_node(
         tex_node.image = image
         if is_non_color:
             image.colorspace_settings.name = "Non-Color"
+        else:
+            image.colorspace_settings.name = "sRGB"
     else:
         logger.warning(f"Texture not found: {tex_name}")
 
@@ -211,13 +213,16 @@ def _find_and_load_texture(tex_name: str, odr_dir: Path) -> bpy.types.Image | No
 
     base_name = Path(name).name if "/" in name else name
 
-    if not base_name.lower().endswith(".dds"):
-        base_name_dds = base_name + ".dds"
-    else:
-        base_name_dds = base_name
-        base_name = base_name[:-4]
+    # Strip known texture extensions (.dds, .otx) to get clean stem
+    for ext in (".dds", ".otx", ".DDS", ".OTX"):
+        if base_name.lower().endswith(ext.lower()):
+            base_name = base_name[:-len(ext)]
+            break
 
-    # Search directories
+    base_name_dds = base_name + ".dds"
+    base_name_otx = base_name + ".otx"
+
+    # Search directories: odr folder + immediate subfolders
     search_dirs = [odr_dir]
     if odr_dir.is_dir():
         for child in odr_dir.iterdir():
@@ -227,17 +232,29 @@ def _find_and_load_texture(tex_name: str, odr_dir: Path) -> bpy.types.Image | No
     for search_dir in search_dirs:
         candidates.append(search_dir / base_name_dds)
         candidates.append(search_dir / base_name_dds.lower())
+        candidates.append(search_dir / base_name_otx)
+        candidates.append(search_dir / base_name_otx.lower())
 
-    # Check if already loaded in Blender
+    # Check if already loaded in Blender — match by stem only (ignore .001 suffixes)
     for img in bpy.data.images:
-        img_name = Path(img.filepath).stem.lower() if img.filepath else img.name.lower()
-        if img_name == base_name.lower():
+        if img.filepath:
+            img_stem = Path(img.filepath).stem.lower()
+        else:
+            # Strip Blender duplicate suffixes like ".001", ".002"
+            img_stem = img.name.lower()
+            import re
+            img_stem = re.sub(r"\.\d{3}$", "", img_stem)
+            img_stem = re.sub(r"\.(dds|otx)$", "", img_stem)
+        if img_stem == base_name.lower():
             return img
 
     for path in candidates:
         if path.exists():
             try:
-                return bpy.data.images.load(str(path))
+                image = bpy.data.images.load(str(path))
+                # Rename to clean stem (no extension, no .001 suffix)
+                image.name = base_name
+                return image
             except RuntimeError:
                 continue
 

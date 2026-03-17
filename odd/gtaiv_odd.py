@@ -9,6 +9,7 @@ from bpy.types import Operator, PropertyGroup
 from bpy_extras.io_utils import ImportHelper
 from loguru import logger
 
+from ..odr.gtaiv_odr import _detect_version
 from ..blender_utils import try_unregister_class
 from ..blender_utils import create_empty_obj, parent_objs, apply_copy_transforms, find_bone_by_id
 from ..light import import_lights
@@ -27,7 +28,14 @@ def import_odd(self, filepath: Path) -> tuple[int, int, int]:
     file_extension = filepath.suffix
 
     if file_extension == ".odd":
-        odd_data = gta_iv_odd_to_dict(filepath.resolve())
+        odd_data =         version = _detect_version(filepath)
+        if version and version != "110 12":
+            raise ValueError(
+                f"Unsupported .odd version: {version}\\n"
+                f"File: {filepath}\\n"
+                f"Expected GTA IV version 110 12."
+            )
+        gta_iv_odd_to_dict(filepath.resolve())
     elif file_extension == ".json":
         with open(filepath, "r") as odd_file:
             odd_data = orjson.loads(odd_file.read())

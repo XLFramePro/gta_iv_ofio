@@ -27,11 +27,33 @@ from ..openformats2json.gta_iv_wdr import gta_iv_odr_to_dict
 from ..skel import import_skel
 
 
+def _detect_version(filepath: Path) -> str:
+    """Read the first Version line of an openFormats file."""
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("Version"):
+                    return stripped[len("Version"):].strip()
+    except OSError:
+        pass
+    return ""
+
+
 def import_odr(self, filepath: Path) -> tuple[int, int, int]:
     filename = filepath.name
     file_extension = filepath.suffix
 
+    # Detect version before parsing to give a clear error for non-GTA IV files
     if file_extension == ".odr":
+        version = _detect_version(filepath)
+        if version and version != "110 12":
+            raise ValueError(
+                f"Unsupported .odr version: {version}\n"
+                f"File: {filepath}\n"
+                f"This file is not a GTA IV .odr (expected version 110 12).\n"
+                f"If this is a Max Payne 3 file, use: File > Import > Max Payne 3 openFormats > Import .odr (MP3)"
+            )
         odr_data = gta_iv_odr_to_dict(filepath.resolve())
     elif file_extension == ".json":
         with open(filepath, "r") as odr_file:
