@@ -10,6 +10,7 @@ from .mesh import register as register_import_mesh, unregister as unregister_imp
 from .odd.import_odd import register as register_import_odd, unregister as unregister_import_odd, ImportGTAIVODD
 from .odr.import_odr import register as register_import_odr, unregister as unregister_import_odr, ImportGTAIVODR
 from .oft.import_oft import register as register_import_oft, unregister as unregister_import_oft, ImportGTAIVOFT
+from .obn.import_obn import register as register_import_obn, unregister as unregister_import_obn, ImportGTAIVOBN
 from .ofio_ui import register as register_ui, unregister as unregister_ui
 from .panels import register as register_panels, unregister as unregister_panels
 from .properties import register as register_properties, unregister as unregister_properties
@@ -26,12 +27,13 @@ class GTA4_MT_import_menu(Menu):
         layout.operator(ImportGTAIVODR.bl_idname)
         layout.operator(ImportGTAIVOFT.bl_idname)
         layout.operator(ImportGTAIVODD.bl_idname)
+        layout.operator(ImportGTAIVOBN.bl_idname)
 
         layout.separator()
 
         layout.operator(ImportGTAIVMesh.bl_idname)
         layout.operator(ImportGTAIVLight.bl_idname)
-
+        
 
 def import_menu_draw(self, context):
     self.layout.menu(GTA4_MT_import_menu.bl_idname)
@@ -68,6 +70,7 @@ def register():
     register_import_odr()
     register_import_oft()
     register_import_odd()
+    register_import_obn()
     register_import_mesh()
     register_import_light()
 
@@ -98,6 +101,7 @@ def unregister():
     unregister_import_odr()
     unregister_import_oft()
     unregister_import_odd()
+    unregister_import_obn()
     unregister_import_mesh()
     unregister_import_light()
 
