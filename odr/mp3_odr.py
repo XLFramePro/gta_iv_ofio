@@ -407,10 +407,10 @@ def import_mp3_odr(self, filepath: Path) -> int:
 # ─── Operator ─────────────────────────────────────────────────────────────────
 
 class ImportMP3ODR(Operator, ImportHelper):
-    """Imports a Max Payne 3 openFormats .odr file"""
+    """Imports Open Drawable Resource"""
 
     bl_idname  = "mp3_ofio.import_odr"
-    bl_label   = "Import .odr [MP3]"
+    bl_label   = "Import .odr"
 
     filename_ext = ".odr"
     filter_glob: StringProperty(default="*.odr", options={"HIDDEN"})

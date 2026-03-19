@@ -1,50 +1,62 @@
 """
-Max Payne 3 binary .wdr importer for Blender 4.x
+Max Payne 3 binary .wdr importer for Blender 4.x  (RSC05 / RAGE)
 
-Format: RSC05 (RAGE Resource Compiler v5)
-  Header: "RSC\x05" + version(4) + sys_flags(4) → 12 bytes total
-  Payload: zlib-compressed data starting at offset 12
+RSC05 layout (after zlib decompression from offset 12):
+  [0 .. SYS_SIZE-1]  System segment  – CPU structs, vertex data, texture metadata
+  [SYS_SIZE .. end]  Graphics segment – index buffers, DXT pixel data
 
-  Decompressed layout:
-    [0 .. SYS_SIZE-1]   System segment  (CPU structs, vertex data, shader info)
-    [SYS_SIZE .. end]   Graphics segment (index buffers)
+Virtual pointer encoding:
+  0x50xxxxxx  →  sys  offset  =  ptr & 0x00FFFFFF
+  0x60xxxxxx  →  gfx  offset  =  SYS_SIZE + (ptr & 0x00FFFFFF)
 
-  SYS_SIZE is determined by probing index buffer validity (sys_size = 0x180000 for known files).
-  All pointers are virtual:
-    0x50xxxxxx → system segment at offset (ptr & 0x00FFFFFF)
-    0x60xxxxxx → graphics segment at offset SYS_SIZE + (ptr & 0x00FFFFFF)
+Key structures parsed:
+  CrmDrawable  (root at offset 0)
+    [0x08]  shader_group_ptr  →  CrmShaderGroup
+    [0x40]  models_coll_ptr   →  collection of CrmModel ptrs
 
-  Root CrmDrawable at decompressed[0]:
-    [0x08] shader_group_ptr → CrmShaderGroup
-    [0x40] lod_models_collection_ptr → ptr array of 14 CrmModel ptrs
+  CrmShaderGroup  (at sg_off)
+    [0x04]  shaders_pgArray_ptr
+    [0x08]  (unused by this importer)
+    [0x0C]  shader_count (u16 lo)
+    [0x20 .. +4*N]  N inline shader ptrs
+    [0x20 - 0x10]   shader_index_pairs array (u16 pairs, 2 per u32)
 
-  CrmShaderGroup at resolved ptr:
-    [0x00] models_array_ptr → array_ptr (ptr), [0x04] count (u16)
-    [0x08] texture_dict_ptr
-    [0x10] shader_params_offsets ...
+  grmShader  (per shader)
+    [0x00]  params_ptr   →  param block (12 bytes each)
+    [0x08]  param_count  (lower byte)
+    Param entry (12 bytes):  hash(4) | flags(4) | data_ptr(4)
+      data_ptr pointing to a grmTexture (vftable=0x00836FBC) = texture sampler
 
-  CrmModel (0x50 bytes each):
-    [0x0C] vbd_ptr → CrmVertexBuffer descriptor
-    [0x1C] ibd_ptr → CrmIndexBuffer descriptor
+  grmTexture  (stride 0x60, vftable=0x00836FBC)
+    [0x18]  name_ptr  (0x50 → ASCII string)
+    [0x20]  (w<<16)|h  (u32)
+    [0x24]  (mips<<16)  (u32)
+    [0x28]  DXT format  FourCC  (DXT1/DXT3/DXT5)
+    [0x50]  pixel_data_ptr  (0x60 → gfx segment)
 
-  CrmVertexBuffer:
-    [0x04] stride (lower 16 bits)
-    [0x08] vertex_data_ptr (0x50xxxxxx → sys segment)
-    [0x0C] vertex_count
+  CrmModel  (per geometry, 0x50 bytes)
+    [0x0C]  vbd_ptr  →  CrmVertexBuffer
+    [0x1C]  ibd_ptr  →  CrmIndexBuffer
 
-  CrmIndexBuffer:
-    [0x04] index_count
-    [0x08] index_data_ptr (0x60xxxxxx → gfx segment)
+  CrmVertexBuffer
+    [0x04]  stride (lower 16 bits)
+    [0x08]  vertex_data_ptr  (0x50)
+    [0x0C]  vertex_count
 
-  Vertex format (stride 52): pos(12) + norm(12) + color(4) + uv(8) + tangent(16)
-  Vertex format (stride 36): pos(12) + norm(12) + color(4) + uv(8)
-  Indices: u16, triangles
+  CrmIndexBuffer
+    [0x04]  index_count
+    [0x08]  index_data_ptr  (0x60)
+
+Vertex format  stride=52:  pos(12) + norm(12) + color(4) + uv(8) + tangent(16)
+Vertex format  stride=36:  pos(12) + norm(12) + color(4) + uv(8)
+Indices: u16 triangles
 """
 
 from pathlib import Path
-from time import time
 import struct
+import tempfile
 import zlib
+from time import time
 
 import bpy
 from bpy.props import StringProperty, CollectionProperty
@@ -54,122 +66,319 @@ from bpy_extras.io_utils import ImportHelper
 from ..blender_utils import create_empty_obj, try_unregister_class
 
 
-# ─── RSC05 constants ──────────────────────────────────────────────────────────
+# ─── Constants ────────────────────────────────────────────────────────────────
 
-RSC05_MAGIC   = b"RSC\x05"
-RSC05_VERSION = 144  # MP3 WDR version
+RSC05_MAGIC       = b"RSC\x05"
+RSC05_VERSION     = 144
+GRMTEX_VFTABLE    = 0x00836FBC
+DXT1              = 0x31545844
+DXT3              = 0x33545844
+DXT5              = 0x35545844
+SUPPORTED_FORMATS = (DXT1, DXT3, DXT5)
 
 
 # ─── Low-level helpers ────────────────────────────────────────────────────────
 
-def _rp(data, offset):
-    return struct.unpack_from("<I", data, offset)[0] if offset + 4 <= len(data) else 0
+def _rp(d, o):  return struct.unpack_from("<I", d, o)[0] if o + 4 <= len(d) else 0
+def _ru16(d, o): return struct.unpack_from("<H", d, o)[0] if o + 2 <= len(d) else 0
 
-def _ru16(data, offset):
-    return struct.unpack_from("<H", data, offset)[0] if offset + 2 <= len(data) else 0
-
-def _rf32(data, offset):
-    return struct.unpack_from("<f", data, offset)[0] if offset + 4 <= len(data) else 0.0
-
-
-# ─── RSC05 decompression ──────────────────────────────────────────────────────
-
-def _decompress_rsc05(raw: bytes) -> bytes:
-    """Decompress RSC05 zlib payload (starts at offset 12)."""
-    if raw[:4] != RSC05_MAGIC:
-        raise ValueError(f"Not an RSC05 file (magic={raw[:4]})")
-    version = struct.unpack_from("<I", raw, 4)[0]
-    if version != RSC05_VERSION:
-        raise ValueError(f"Unsupported RSC05 version {version} (expected {RSC05_VERSION})")
-    return zlib.decompress(raw[12:])
+def _read_str(data, off, maxlen=128):
+    end = off
+    while end < off + maxlen and end < len(data) and data[end] != 0:
+        end += 1
+    return data[off:end].decode("utf-8", errors="replace")
 
 
-def _find_sys_size(data: bytes, vdata_ptr: int, probe_ib_gfx_off: int,
-                   probe_icount: int, probe_vcount: int) -> int:
-    """
-    Find the correct sys/gfx boundary by probing index validity.
-    Tries candidates and returns the sys_size where max(indices) < vcount.
-    """
-    for sys_sz in range(0x100000, 0x400000, 0x20000):
-        ib_phys = sys_sz + probe_ib_gfx_off
-        if ib_phys + probe_icount * 2 > len(data):
-            continue
-        idxs = struct.unpack_from(f"<{probe_icount}H", data, ib_phys)
-        if max(idxs) < probe_vcount:
-            return sys_sz
-    return 0x180000  # fallback
-
-
-# ─── Pointer resolution ───────────────────────────────────────────────────────
+# ─── RSC05 container ──────────────────────────────────────────────────────────
 
 class _RSC05:
-    def __init__(self, data: bytes, sys_size: int):
-        self.data     = data
-        self.sys_size = sys_size
+    """Decompressed RSC05 resource with pointer resolution."""
 
-    def resolve(self, ptr: int):
-        """Return absolute offset in decompressed data, or None."""
+
+    def __init__(self, raw: bytes):
+        if raw[:4] != RSC05_MAGIC:
+            raise ValueError(f"Not an RSC05 file (magic={raw[:4]})")
+        version = struct.unpack_from("<I", raw, 4)[0]
+        if version != RSC05_VERSION:
+            raise ValueError(f"Unsupported RSC05 version {version} (expected {RSC05_VERSION})")
+        self._data = zlib.decompress(raw[12:])
+        self.sys_size = self._probe_sys_size()
+
+    # ── pointer resolution ──
+    def resolve(self, ptr):
         if ptr == 0 or ptr == 0xFFFFFFFF:
             return None
         hi = ptr >> 24
         lo = ptr & 0x00FFFFFF
-        if hi == 0x50:
-            return lo
-        if hi == 0x60:
-            return self.sys_size + lo
+        if hi == 0x50: return lo
+        if hi == 0x60: return self.sys_size + lo
         return None
 
-    def rp(self, off): return _rp(self.data, off)
-    def ru16(self, off): return _ru16(self.data, off)
-    def rf32(self, off): return _rf32(self.data, off)
+    def rp(self, off):   return _rp(self._data, off)
+    def ru16(self, off): return _ru16(self._data, off)
+    def rs(self, off):   return _read_str(self._data, off)
+    def raw_slice(self, off, n): return self._data[off:off + n]
+
+    # ── sys_size probe ──
+    def _probe_sys_size(self):
+        data = self._data
+        # Find model0 → VBD → IBD → gfx ptr, then scan sys_size candidates
+        models_ptr   = _rp(data, 0x40)
+        coll_off     = models_ptr & 0x00FFFFFF if (models_ptr >> 24) == 0x50 else None
+        if not coll_off:
+            return 0x180000
+        model0_ptr = _rp(data, coll_off + 0x50)
+        model0_off = model0_ptr & 0x00FFFFFF if (model0_ptr >> 24) == 0x50 else None
+        if not model0_off:
+            return 0x180000
+        vbd_ptr  = _rp(data, model0_off + 0x0C)
+        ibd_ptr  = _rp(data, model0_off + 0x1C)
+        vbd_off  = vbd_ptr & 0x00FFFFFF if (vbd_ptr >> 24) == 0x50 else None
+        ibd_off  = ibd_ptr & 0x00FFFFFF if (ibd_ptr >> 24) == 0x50 else None
+        if not (vbd_off and ibd_off):
+            return 0x180000
+        vcount    = _rp(data, vbd_off + 0x0C)
+        icount    = _rp(data, ibd_off + 0x04)
+        idata_ptr = _rp(data, ibd_off + 0x08)
+        if (idata_ptr >> 24) != 0x60:
+            return 0x180000
+        ib_gfx = idata_ptr & 0x00FFFFFF
+        for sys_sz in range(0x100000, 0x400000, 0x20000):
+            phys = sys_sz + ib_gfx
+            if phys + icount * 2 > len(data):
+                continue
+            idxs = struct.unpack_from(f"<{icount}H", data, phys)
+            if max(idxs) < vcount:
+                return sys_sz
+        return 0x180000
+
+
+# ─── Texture extraction ───────────────────────────────────────────────────────
+
+def _dxt_mip_size(w, h, fmt):
+    bs = 8 if fmt == DXT1 else 16
+    return max(1, (w + 3) // 4) * max(1, (h + 3) // 4) * bs
+
+def _make_dds_header(w, h, mips, fmt):
+    DDSD_CAPS = 0x1; DDSD_HEIGHT = 0x2; DDSD_WIDTH = 0x4
+    DDSD_PIXELFORMAT = 0x1000; DDSD_LINEARSIZE = 0x80000; DDSD_MIPMAPCOUNT = 0x20000
+    DDPF_FOURCC = 0x4
+    DDSCAPS_TEXTURE = 0x1000; DDSCAPS_MIPMAP = 0x400000; DDSCAPS_COMPLEX = 0x8
+
+    flags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT | DDSD_LINEARSIZE
+    caps  = DDSCAPS_TEXTURE
+    if mips > 1:
+        flags |= DDSD_MIPMAPCOUNT
+        caps  |= DDSCAPS_MIPMAP | DDSCAPS_COMPLEX
+
+    pitch = _dxt_mip_size(w, h, fmt)
+    header  = struct.pack("<4sIIIIII", b"DDS ", 124, flags, h, w, pitch, 0)
+    header += struct.pack("<I", max(1, mips))
+    header += b"\x00" * 44
+    header += struct.pack("<II4sIIIII", 32, DDPF_FOURCC, fmt.to_bytes(4, "little"), 0,0,0,0,0)
+    header += struct.pack("<IIIII", caps, 0, 0, 0, 0)
+    return header  # 128 bytes
+
+def _extract_textures(rsc: _RSC05) -> dict:
+    """
+    Scan sys segment for all grmTexture structs.
+    Returns dict: tex_name → bpy.types.Image
+    """
+    data     = rsc._data
+    sys_size = rsc.sys_size
+    result   = {}
+
+    tmp_dir = tempfile.mkdtemp(prefix="wdr_tex_")
+
+    for off in range(0, sys_size - 0x60, 4):
+        if _rp(data, off) != GRMTEX_VFTABLE:
+            continue
+        fmt = _rp(data, off + 0x28)
+        if fmt not in SUPPORTED_FORMATS:
+            continue
+
+        name_ptr = _rp(data, off + 0x18)
+        name_off = rsc.resolve(name_ptr)
+        w_raw    = _rp(data, off + 0x20)
+        w        = (w_raw >> 16) & 0xFFFF
+        h        = w_raw & 0xFFFF
+        mips     = max(1, (_rp(data, off + 0x24) >> 16) & 0xFF)
+        pix_ptr  = _rp(data, off + 0x50)
+        pix_off  = rsc.resolve(pix_ptr)
+
+        if not (name_off and pix_off and w > 0 and h > 0):
+            continue
+        if pix_off + 16 > len(data):
+            continue
+
+        raw_name = _read_str(data, name_off, 48)
+        # Clean: take only the first name (sometimes two are concatenated)
+        tex_name = raw_name.split("\x00")[0].strip()
+        if not tex_name or tex_name in result:
+            continue
+
+        # Compute total pixel data size
+        total_pix = sum(
+            _dxt_mip_size(max(1, w >> m), max(1, h >> m), fmt)
+            for m in range(mips)
+        )
+        if pix_off + total_pix > len(data):
+            total_pix = len(data) - pix_off
+        if total_pix <= 0:
+            continue
+
+        # Write DDS to temp file
+        dds_path = str(Path(tmp_dir) / f"{tex_name}.dds")
+        dds_data = _make_dds_header(w, h, mips, fmt) + data[pix_off:pix_off + total_pix]
+        with open(dds_path, "wb") as f:
+            f.write(dds_data)
+
+        # Load into Blender
+        try:
+            img = bpy.data.images.load(dds_path)
+            img.name = tex_name
+            # Color space: _nm / _n = Non-Color, else sRGB
+            suffix = tex_name.lower()
+            is_normal = suffix.endswith("_nm") or suffix.endswith("_n")
+            img.colorspace_settings.name = "Non-Color" if is_normal else "sRGB"
+            result[tex_name] = img
+        except Exception:
+            pass
+
+    return result
+
+
+# ─── Shader → texture mapping ─────────────────────────────────────────────────
+
+def _parse_shader_group(rsc: _RSC05) -> tuple:
+    """
+    Returns:
+      shader_textures : dict[shader_idx] → [tex_name, ...]   (first = diffuse)
+      geom_shader_idx : list[int]  (per-geometry shader index, 16 entries)
+    """
+    sg_ptr = rsc.rp(0x08)
+    sg_off = rsc.resolve(sg_ptr)
+    if sg_off is None:
+        return {}, []
+
+    shader_count = rsc.ru16(sg_off + 0x0C)
+
+    # ── per-shader texture names ──
+    shader_textures = {}
+    for si in range(shader_count):
+        shader_ptr = rsc.rp(sg_off + 0x20 + si * 4)
+        shader_off = rsc.resolve(shader_ptr)
+        if shader_off is None:
+            continue
+        params_ptr  = rsc.rp(shader_off + 0x00)
+        param_count = rsc.rp(shader_off + 0x08) & 0xFF
+        params_off  = rsc.resolve(params_ptr)
+        if params_off is None:
+            continue
+        tex_names = []
+        for pi in range(param_count):
+            p_off  = params_off + pi * 12
+            p_ptr  = rsc.rp(p_off + 8)
+            p_off2 = rsc.resolve(p_ptr)
+            if p_off2 is None:
+                continue
+            if rsc.rp(p_off2) == GRMTEX_VFTABLE:
+                name_ptr = rsc.rp(p_off2 + 0x18)
+                name_off = rsc.resolve(name_ptr)
+                if name_off:
+                    raw = _read_str(rsc._data, name_off, 48)
+                    tex_names.append(raw.split("\x00")[0].strip())
+        shader_textures[si] = tex_names
+
+    # ── per-geometry shader index array ──
+    # Located just before the inline shader ptr list, at sg_off+0x10
+    # Packed as u32 where lo16=geom_even, hi16=geom_odd
+    geom_shader_idx = []
+    geom_idx_arr_off = sg_off + 0x10
+    for i in range(8):
+        v    = rsc.rp(geom_idx_arr_off + i * 4)
+        lo16 = v & 0xFFFF
+        hi16 = (v >> 16) & 0xFFFF
+        geom_shader_idx.extend([lo16, hi16])
+
+    return shader_textures, geom_shader_idx
+
+
+# ─── Material builder ─────────────────────────────────────────────────────────
+
+def _make_material(name: str, tex_images: list) -> bpy.types.Material:
+    """Create a Principled BSDF material from a list of images (diffuse first)."""
+    mat = bpy.data.materials.get(name)
+    if mat:
+        return mat
+
+    mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    nodes.clear()
+
+    output = nodes.new("ShaderNodeOutputMaterial"); output.location = (400, 0)
+    bsdf   = nodes.new("ShaderNodeBsdfPrincipled"); bsdf.location   = (0, 0)
+    mat.node_tree.links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+
+    x = -300
+    for img in tex_images:
+        if img is None:
+            continue
+        tex_node = nodes.new("ShaderNodeTexImage")
+        tex_node.image    = img
+        tex_node.location = (x, 200 if x == -300 else -150)
+
+        name_lower = img.name.lower()
+        is_normal  = name_lower.endswith("_nm") or name_lower.endswith("_n")
+
+        if is_normal:
+            nmap = nodes.new("ShaderNodeNormalMap")
+            nmap.location = (-100, -150)
+            mat.node_tree.links.new(tex_node.outputs["Color"], nmap.inputs["Color"])
+            mat.node_tree.links.new(nmap.outputs["Normal"],    bsdf.inputs["Normal"])
+        else:
+            mat.node_tree.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
+
+        x -= 300
+
+    return mat
 
 
 # ─── Geometry reader ──────────────────────────────────────────────────────────
 
-def _read_geometry(rsc: _RSC05, model_off: int):
-    """
-    Read one CrmModel geometry (0x50 bytes) from sys segment.
-    Returns dict with verts, normals, colors, uvs, faces — or None.
-    """
+def _read_geometry(rsc: _RSC05, model_off: int) -> dict | None:
     vbd_ptr = rsc.rp(model_off + 0x0C)
     ibd_ptr = rsc.rp(model_off + 0x1C)
-
     vbd_off = rsc.resolve(vbd_ptr)
     ibd_off = rsc.resolve(ibd_ptr)
-    if vbd_off is None or ibd_off is None:
+    if not (vbd_off and ibd_off):
         return None
 
-    stride     = rsc.rp(vbd_off + 0x04) & 0xFFFF
-    vcount     = rsc.rp(vbd_off + 0x0C)
-    vdata_ptr  = rsc.rp(vbd_off + 0x08)
-    icount     = rsc.rp(ibd_off + 0x04)
-    idata_ptr  = rsc.rp(ibd_off + 0x08)
+    stride    = rsc.rp(vbd_off + 0x04) & 0xFFFF
+    vcount    = rsc.rp(vbd_off + 0x0C)
+    vdata_ptr = rsc.rp(vbd_off + 0x08)
+    icount    = rsc.rp(ibd_off + 0x04)
+    idata_ptr = rsc.rp(ibd_off + 0x08)
 
     vdata_off = rsc.resolve(vdata_ptr)
     idata_off = rsc.resolve(idata_ptr)
-    if vdata_off is None or idata_off is None:
-        return None
-    if stride == 0 or vcount == 0 or icount == 0:
+    if not (vdata_off and idata_off and stride and vcount and icount):
         return None
     if icount % 3 != 0:
         return None
 
-    data = rsc.data
-
-    # ── Vertices ──
+    data = rsc._data
     verts, normals, colors, uvs = [], [], [], []
     for i in range(vcount):
         off = vdata_off + i * stride
-        if off + 28 > len(data):
-            break
-        x, y, z = struct.unpack_from("<fff", data, off)
+        if off + 28 > len(data): break
+        x, y, z    = struct.unpack_from("<fff", data, off)
         nx, ny, nz = struct.unpack_from("<fff", data, off + 12)
         r, g, b, a = data[off+24], data[off+25], data[off+26], data[off+27]
-
-        u, v = 0.0, 0.0
+        u = v = 0.0
         if stride >= 36 and off + 36 <= len(data):
             u, v = struct.unpack_from("<ff", data, off + 28)
-
         verts.append((x, y, z))
         normals.append((nx, ny, nz))
         colors.append((r, g, b, a))
@@ -178,45 +387,30 @@ def _read_geometry(rsc: _RSC05, model_off: int):
     if not verts:
         return None
 
-    # ── Indices → faces ──
+    n = len(verts)
     faces = []
     if idata_off + icount * 2 <= len(data):
-        raw_indices = struct.unpack_from(f"<{icount}H", data, idata_off)
-        n = len(verts)
+        raw_idx = struct.unpack_from(f"<{icount}H", data, idata_off)
         for t in range(0, icount - 2, 3):
-            i0, i1, i2 = raw_indices[t], raw_indices[t+1], raw_indices[t+2]
+            i0, i1, i2 = raw_idx[t], raw_idx[t+1], raw_idx[t+2]
             if i0 < n and i1 < n and i2 < n:
                 faces.append((i0, i1, i2))
 
-    if not faces:
-        return None
-
-    return {
-        "verts":   verts,
-        "normals": normals,
-        "colors":  colors,
-        "uvs":     uvs,
-        "faces":   faces,
-        "stride":  stride,
-    }
+    return {"verts": verts, "normals": normals, "colors": colors,
+            "uvs": uvs, "faces": faces} if faces else None
 
 
 # ─── Blender mesh builder ─────────────────────────────────────────────────────
 
-def _build_mesh(name: str, geo: dict, collection) -> bpy.types.Object | None:
-    verts   = geo["verts"]
-    faces   = geo["faces"]
-    normals = geo["normals"]
-    colors  = geo["colors"]
-    uvs     = geo["uvs"]
-
+def _build_mesh(name: str, geo: dict, mat: bpy.types.Material | None,
+                collection) -> bpy.types.Object | None:
     mesh = bpy.data.meshes.new(name)
     obj  = bpy.data.objects.new(name, mesh)
     collection.objects.link(obj)
-
-    mesh.from_pydata(verts, [], faces)
+    mesh.from_pydata(geo["verts"], [], geo["faces"])
 
     # Vertex colours
+    colors = geo["colors"]
     if colors:
         CNAME = "Col"
         if CNAME in mesh.attributes:
@@ -225,11 +419,10 @@ def _build_mesh(name: str, geo: dict, collection) -> bpy.types.Object | None:
                 mesh.attributes.remove(ex)
         if CNAME not in mesh.attributes:
             mesh.attributes.new(CNAME, "BYTE_COLOR", "CORNER")
-        ca = mesh.attributes[CNAME]
+        ca   = mesh.attributes[CNAME]
         flat = []
         for loop in mesh.loops:
-            vi = loop.vertex_index
-            c  = colors[vi] if vi < len(colors) else (255, 255, 255, 255)
+            c = colors[loop.vertex_index]
             flat.extend(x / 255.0 for x in c)
         ca.data.foreach_set("color", flat)
         try:
@@ -237,7 +430,8 @@ def _build_mesh(name: str, geo: dict, collection) -> bpy.types.Object | None:
         except Exception:
             pass
 
-    # UV map
+    # UVs
+    uvs = geo["uvs"]
     if uvs:
         uv_layer = mesh.uv_layers.new(name="UVMap").uv
         for loop in mesh.loops:
@@ -247,7 +441,8 @@ def _build_mesh(name: str, geo: dict, collection) -> bpy.types.Object | None:
                 uv_layer[loop.index].vector = (u, 1.0 - v)
 
     # Custom normals
-    if normals and len(normals) == len(verts):
+    normals = geo["normals"]
+    if normals and len(normals) == len(geo["verts"]):
         try:
             if "sharp_vector" not in mesh.attributes:
                 mesh.attributes.new("sharp_vector", "FLOAT_VECTOR", "POINT")
@@ -262,6 +457,10 @@ def _build_mesh(name: str, geo: dict, collection) -> bpy.types.Object | None:
             except AttributeError:
                 pass
 
+    # Material
+    if mat:
+        obj.data.materials.append(mat)
+
     mesh.validate(verbose=False)
     mesh.update()
     return obj
@@ -270,88 +469,65 @@ def _build_mesh(name: str, geo: dict, collection) -> bpy.types.Object | None:
 # ─── Main importer ────────────────────────────────────────────────────────────
 
 def import_mp3_wdr(self, filepath: Path) -> int:
-    """Import a MP3 binary .wdr file. Returns number of mesh objects created."""
-    raw        = filepath.read_bytes()
-    data       = _decompress_rsc05(raw)
-    collection = bpy.context.collection
-    filename   = filepath.name
+    raw  = filepath.read_bytes()
+    rsc  = _RSC05(raw)
+    coll = bpy.context.collection
 
-    # ── Locate root drawable geometry collection ──
-    # Root struct at offset 0
-    # [0x40] → shader group / model collection ptr
-    models_ptr = _rp(data, 0x40)
-    hi = models_ptr >> 24
-    if hi != 0x50:
-        raise ValueError(f"Unexpected models ptr: 0x{models_ptr:08X}")
+    # 1. Extract all embedded textures → Blender images
+    tex_images = _extract_textures(rsc)
 
-    collection_off = models_ptr & 0x00FFFFFF
+    # 2. Parse shader group → per-shader tex names + per-geom shader index
+    shader_textures, geom_shader_idx = _parse_shader_group(rsc)
 
-    # CrmGeomCollection:
-    # [0x00] array_ptr (pointer to array of CrmModel ptrs)
-    # [0x04] count (lower u16)
-    # [0x50..0x?] direct list of CrmModel structs (0x50 bytes each)
-    # 
-    # Based on analysis: models start at collection_off + 0x50
-    # and there are N models (count encoded in ptr spacing)
+    # 3. Build materials (one per shader that has textures)
+    materials = {}
+    for si, tex_names in shader_textures.items():
+        if not tex_names:
+            continue
+        imgs = [tex_images.get(n) for n in tex_names if tex_images.get(n)]
+        if imgs:
+            mat_name = tex_names[0]  # use diffuse name as material name
+            materials[si] = _make_material(mat_name, imgs)
 
-    # Probe first model to determine sys_size
-    # model ptrs start at collection_off + 0x50 (array of 0x50-pointers)
-    model0_ptr = _rp(data, collection_off + 0x50)
-    model0_off = model0_ptr & 0x00FFFFFF if (model0_ptr >> 24) == 0x50 else None
-    vbd0_ptr   = _rp(data, model0_off + 0x0C) if model0_off else 0
-    ibd0_ptr   = _rp(data, model0_off + 0x1C) if model0_off else 0
+    # 4. Collect model offsets
+    models_ptr     = rsc.rp(0x40)
+    collection_off = models_ptr & 0x00FFFFFF if (models_ptr >> 24) == 0x50 else None
+    if collection_off is None:
+        raise ValueError("Could not find models collection")
 
-    vbd0_off   = vbd0_ptr & 0x00FFFFFF if (vbd0_ptr >> 24) == 0x50 else None
-    ibd0_off   = ibd0_ptr & 0x00FFFFFF if (ibd0_ptr >> 24) == 0x50 else None
-
-    sys_size = 0x180000  # default
-    if vbd0_off and ibd0_off:
-        vcount0    = _rp(data, vbd0_off + 0x0C)
-        icount0    = _rp(data, ibd0_off + 0x04)
-        idata0_ptr = _rp(data, ibd0_off + 0x08)
-        vdata0_ptr = _rp(data, vbd0_off + 0x08)
-        if (idata0_ptr >> 24) == 0x60:
-            ib0_gfx_off = idata0_ptr & 0x00FFFFFF
-            sys_size = _find_sys_size(data, vdata0_ptr, ib0_gfx_off, icount0, vcount0)
-
-    rsc = _RSC05(data, sys_size)
-
-    # ── Collect model pointers ──
-    # At collection_off + 0x50..+0x8C: array of ptrs to CrmModel structs
-    # Count by reading 4-byte ptrs until the high byte is not 0x50/0x60
-    MAX_MODELS = 64
     model_offs = []
     model_ptrs_off = collection_off + 0x50
-    for i in range(MAX_MODELS):
-        model_ptr = rsc.rp(model_ptrs_off + i * 4)
-        hi = model_ptr >> 24
+    for i in range(64):
+        mp  = rsc.rp(model_ptrs_off + i * 4)
+        hi  = mp >> 24
         if hi not in (0x50, 0x60):
             break
-        model_off = rsc.resolve(model_ptr)
-        if model_off is None:
-            break
-        model_offs.append(model_off)
+        off = rsc.resolve(mp)
+        if off:
+            model_offs.append(off)
 
     if not model_offs:
         raise ValueError("No geometry models found in WDR")
 
-    # ── Root empty ──
-    root_empty = create_empty_obj(filename)
+    # 5. Create root empty
+    root_empty = create_empty_obj(filepath.name)
     root_empty["filepath"] = str(filepath)
 
-    # ── Import each model ──
+    # 6. Import each geometry with its material
     count = 0
-    for i, model_off in enumerate(model_offs):
+    for gi, model_off in enumerate(model_offs):
         geo = _read_geometry(rsc, model_off)
         if geo is None:
             continue
 
-        name = f"{filepath.stem}_geo{i}"
-        obj  = _build_mesh(name, geo, collection)
+        si  = geom_shader_idx[gi] if gi < len(geom_shader_idx) else 0
+        mat = materials.get(si)
+
+        name = f"{filepath.stem}_geo{gi}"
+        obj  = _build_mesh(name, geo, mat, coll)
         if obj:
             obj.parent = root_empty
             obj.matrix_parent_inverse = root_empty.matrix_world.inverted()
-            obj["stride"] = geo["stride"]
             count += 1
 
     return count
@@ -360,11 +536,10 @@ def import_mp3_wdr(self, filepath: Path) -> int:
 # ─── Operator ─────────────────────────────────────────────────────────────────
 
 class ImportMP3WDR(Operator, ImportHelper):
-    """Imports a Max Payne 3 binary .wdr file (RSC05 RAGE resource)"""
+    """Imports Binary Drawable Resource"""
 
     bl_idname    = "mp3_ofio.import_wdr"
-    bl_label     = "Import .wdr [MP3]"
-
+    bl_label     = "Import .wdr"
     filename_ext = ".wdr"
     filter_glob: StringProperty(default="*.wdr", options={"HIDDEN"})
     files: CollectionProperty(type=PropertyGroup)
@@ -391,7 +566,6 @@ class ImportMP3WDR(Operator, ImportHelper):
 def register():
     try_unregister_class(ImportMP3WDR)
     bpy.utils.register_class(ImportMP3WDR)
-
 
 def unregister():
     bpy.utils.unregister_class(ImportMP3WDR)

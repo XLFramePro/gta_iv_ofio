@@ -284,10 +284,10 @@ def import_obn(self, filepath: Path) -> int:
 # ─── Operator ─────────────────────────────────────────────────────────────────
 
 class ImportGTAIVOBN(Operator, ImportHelper):
-    """Imports a GTA IV openFormats .obn collision (phBound) file"""
+    """Imports Open Collision Resource"""
 
     bl_idname = "gta4_ofio.import_bound"
-    bl_label = "Import .obn (IV)"
+    bl_label = "Import .obn"
 
     filename_ext = ".obn"
     filter_glob: StringProperty(default="*.obn", options={"HIDDEN"})

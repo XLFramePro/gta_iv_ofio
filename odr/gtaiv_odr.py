@@ -127,7 +127,7 @@ class ImportGTAIVODR(Operator, ImportHelper):
     """Imports Open Drawable Resource"""
 
     bl_idname = "gta4_ofio.import_odr"
-    bl_label = "Import .odr(IV)"
+    bl_label = "Import .odr"
 
     filename_ext = ".odr"
 

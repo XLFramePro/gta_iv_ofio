@@ -8,6 +8,7 @@ from .export_mesh import register as register_export_mesh, unregister as unregis
 from .light import register as register_import_light, unregister as unregister_import_light, ImportGTAIVLight
 from .mesh import register as register_import_mesh, unregister as unregister_import_mesh, ImportGTAIVMesh
 from .odd.gtaiv_odd import register as register_import_odd, unregister as unregister_import_odd, ImportGTAIVODD
+from .wbn.import_mp3_wbn import register as register_mp3_wbn, unregister as unregister_mp3_wbn, ImportMP3WBN
 from .wdr.import_mp3_wdr import register as register_mp3_wdr, unregister as unregister_mp3_wdr, ImportMP3WDR
 from .odr.gtaiv_odr import register as register_import_odr, unregister as unregister_import_odr, ImportGTAIVODR
 from .oft.gtaiv_oft import register as register_import_oft, unregister as unregister_import_oft, ImportGTAIVOFT
@@ -27,6 +28,8 @@ class GTA4_MT_import_menu(Menu):
 
     def draw(self, context):
         layout = self.layout
+        layout.label(text="GTA IV - OpenFormats")
+        layout.separator()
         layout.operator(ImportGTAIVODR.bl_idname)
         layout.operator(ImportGTAIVOFT.bl_idname)
         layout.operator(ImportGTAIVODD.bl_idname)
@@ -34,14 +37,30 @@ class GTA4_MT_import_menu(Menu):
 
         layout.separator()
 
+        layout.label(text="GTA IV - Binary")
+
+        layout.separator()
+
+        layout.label(text="GTA IV - Others")
+        layout.separator()
         layout.operator(ImportGTAIVMesh.bl_idname)
         layout.operator(ImportGTAIVLight.bl_idname)
 
         layout.separator()
 
+        layout.label(text="Max Payne 3 - OpenFormats")
+        layout.separator()
         layout.operator(ImportMP3ODR.bl_idname)
         layout.operator(ImportMP3ODD.bl_idname)
+
+        layout.separator()
+
+        layout.label(text="Max Payne 3 - Binary")
+        layout.separator()
         layout.operator(ImportMP3WDR.bl_idname)
+        layout.operator(ImportMP3WBN.bl_idname)
+
+        
         
 
 def import_menu_draw(self, context):
@@ -88,6 +107,7 @@ def register():
     register_mp3_odr()
     register_mp3_odd()
     register_mp3_wdr()
+    register_mp3_wbn()
 
     # Import menu
     try_unregister_class(GTA4_MT_import_menu)
@@ -116,6 +136,7 @@ def unregister():
     unregister_mp3_odr()
     unregister_mp3_odd()
     unregister_mp3_wdr()
+    unregister_mp3_wbn()
 
     # Import
     unregister_import_odr()

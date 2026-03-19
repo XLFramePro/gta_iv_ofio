@@ -97,10 +97,10 @@ def import_mp3_odd(self, filepath: Path) -> tuple:
 # ─── Operator ─────────────────────────────────────────────────────────────────
 
 class ImportMP3ODD(Operator, ImportHelper):
-    """Imports a Max Payne 3 openFormats .odd (Drawable Dictionary) file"""
+    """Imports Open Drawable Dictionary"""
 
     bl_idname = "mp3_ofio.import_odd"
-    bl_label = "Import .odd [MP3]"
+    bl_label = "Import .odd"
 
     filename_ext = ".odd"
     filter_glob: StringProperty(default="*.odd", options={"HIDDEN"})

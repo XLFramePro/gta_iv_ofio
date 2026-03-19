@@ -125,7 +125,7 @@ class ImportGTAIVOFT(Operator, ImportHelper):
     """Imports meshes and lights referenced in the .oft file"""
 
     bl_idname = "gta4_ofio.import_oft"
-    bl_label = "Import .oft(IV)"
+    bl_label = "Import .oft"
 
     filename_ext = ".oft"
 

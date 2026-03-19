@@ -121,7 +121,7 @@ class ImportGTAIVODD(Operator, ImportHelper):
     """Imports Open Drawable Dictionary"""
 
     bl_idname = "gta4_ofio.import_odd"
-    bl_label = "Import .odd(IV)"
+    bl_label = "Import .odd"
 
     filename_ext = ".odd"
 
